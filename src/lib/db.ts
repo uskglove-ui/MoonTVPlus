@@ -61,15 +61,8 @@ function getD1Adapter(): any {
   // 开发环境：better-sqlite3
   const Database = require('better-sqlite3');
   const path = require('path');
-  const fs = require('fs');
 
   const dbPath = path.join(process.cwd(), '.data', 'moontv.db');
-
-  // 检查数据库文件是否存在
-  if (!fs.existsSync(dbPath)) {
-    console.error('❌ SQLite database not found. Please run: npm run init:sqlite');
-    throw new Error('SQLite database not initialized');
-  }
 
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL'); // 启用 WAL 模式提升性能
