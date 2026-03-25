@@ -2,7 +2,7 @@
 
 'use client';
 
-import { AlertCircle, Cloud, Heart, Sparkles, X } from 'lucide-react';
+import { AlertCircle, Cloud, Heart, Loader2, Router, Sparkles, X } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useRef, useState } from 'react';
 
@@ -86,6 +86,7 @@ interface WakeLockSentinel {
 }
 
 function PlayPageClient() {
+  const LOCAL_TRANSCODER_BASE_URL = 'http://localhost:19080';
   const router = useRouter();
   const searchParams = useSearchParams();
   const enableComments = useEnableComments();
@@ -491,6 +492,7 @@ function PlayPageClient() {
   const [showDanmakuFilterSettings, setShowDanmakuFilterSettings] = useState(false);
   const [currentSearchKeyword, setCurrentSearchKeyword] = useState<string>(''); // 当前搜索使用的关键词
   const [toast, setToast] = useState<ToastProps | null>(null);
+  const [isTranscoding, setIsTranscoding] = useState(false);
 
   useEffect(() => {
     danmakuSettingsRef.current = danmakuSettings;
@@ -594,6 +596,19 @@ function PlayPageClient() {
       source.startsWith('emby_') ||
       source.startsWith('script:')
     );
+  };
+
+  const isM3u8LikeUrl = (url?: string) => {
+    if (!url) return false;
+    const normalizedUrl = url.toLowerCase();
+    return normalizedUrl.includes('.m3u8') || normalizedUrl.includes('/m3u8/');
+  };
+
+  const buildAbsoluteUrl = (url: string) => {
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      return url;
+    }
+    return `${window.location.origin}${url.startsWith('/') ? '' : '/'}${url}`;
   };
 
   // 搜索所需信息
@@ -1298,6 +1313,105 @@ function PlayPageClient() {
 
   // 视频源代理模式状态
   const [sourceProxyMode, setSourceProxyMode] = useState(false);
+
+  const resolveCurrentExternalPlaybackUrl = async () => {
+    let urlToUse = videoUrl;
+    if (sourceProxyMode && detail?.episodes && currentEpisodeIndex < detail.episodes.length) {
+      urlToUse = detail.episodes[currentEpisodeIndex];
+    }
+
+    if (!urlToUse) {
+      return null;
+    }
+
+    return buildAbsoluteUrl(urlToUse);
+  };
+
+  const handleCreateTranscodeSession = async () => {
+    if (isTranscoding) return;
+
+    try {
+      setIsTranscoding(true);
+      const currentPlayTime = artPlayerRef.current?.currentTime || 0;
+
+      const sourceUrl = await resolveCurrentExternalPlaybackUrl();
+      if (!sourceUrl) {
+        throw new Error('当前没有可转码的播放链接');
+      }
+
+      const requestHeaders: Record<string, string> = {};
+      if (sourceUrl.startsWith(window.location.origin)) {
+        if (document.cookie) {
+          requestHeaders.Cookie = document.cookie;
+        }
+        requestHeaders.Referer = `${window.location.origin}/`;
+      }
+
+      const response = await fetch(`${LOCAL_TRANSCODER_BASE_URL}/v1/sessions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          url: sourceUrl,
+          headers: Object.keys(requestHeaders).length > 0 ? requestHeaders : undefined,
+          subtitle: {
+            mode: 'burn_embedded',
+            stream: 'auto',
+          },
+          refresh: false,
+        }),
+      });
+
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(data?.error || data?.message || `转码请求失败 (${response.status})`);
+      }
+
+      const playUrl = data?.playlist_url || data?.play_url;
+      if (!playUrl) {
+        throw new Error('转码器未返回播放地址');
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+
+      currentXiaoyaUrlRef.current = '';
+      proxyAttemptedRef.current = false;
+      resumeTimeRef.current = currentPlayTime > 0 ? currentPlayTime : null;
+      setVideoQualities([]);
+      setVideoError(null);
+      setCorsFailedUrl(null);
+      setIsVideoLoading(true);
+      setVideoLoadingStage('sourceChanging');
+      setVideoUrl(playUrl);
+      setToast({
+        message: '转码任务已创建，等待 3 秒后已切换到转码地址',
+        type: 'success',
+        onClose: () => setToast(null),
+      });
+    } catch (error) {
+      console.error('创建转码任务失败:', error);
+      setToast({
+        message: error instanceof Error ? error.message : '创建转码任务失败',
+        type: 'error',
+        onClose: () => setToast(null),
+      });
+    } finally {
+      setIsTranscoding(false);
+    }
+  };
+
+  const showExternalTranscodeButton = Boolean(
+    detail &&
+    videoUrl &&
+    !videoUrl.startsWith('blob:') &&
+    !isM3u8LikeUrl(videoUrl) &&
+    (
+      detail.source === 'openlist' ||
+      detail.source === 'xiaoya' ||
+      detail.source.startsWith('emby')
+    )
+  );
 
   // 总集数
   const totalEpisodes = detail?.episodes?.length || 0;
@@ -8288,6 +8402,31 @@ function PlayPageClient() {
                             App打开
                           </span>
                         </button>
+
+                        {showExternalTranscodeButton && (
+                          <button
+                            onClick={async (e) => {
+                              e.preventDefault();
+                              await handleCreateTranscodeSession();
+                            }}
+                            disabled={isTranscoding}
+                            className={`group relative flex items-center justify-center gap-1 w-8 h-8 lg:w-auto lg:h-auto lg:px-2 lg:py-1.5 text-xs font-medium rounded-md transition-all duration-200 shadow-sm hover:shadow-md overflow-hidden border flex-shrink-0 ${
+                              isTranscoding
+                                ? 'bg-amber-400 text-white border-amber-400 cursor-wait'
+                                : 'bg-amber-500 hover:bg-amber-600 text-white border-amber-500 cursor-pointer'
+                            }`}
+                            title='转码播放'
+                          >
+                            {isTranscoding ? (
+                              <Loader2 className='w-4 h-4 flex-shrink-0 text-white animate-spin' />
+                            ) : (
+                              <Router className='w-4 h-4 flex-shrink-0 text-white' />
+                            )}
+                            <span className='hidden lg:inline max-w-0 group-hover:max-w-[100px] overflow-hidden whitespace-nowrap transition-all duration-200 ease-in-out text-white'>
+                              {isTranscoding ? '转码中' : '转码'}
+                            </span>
+                          </button>
+                        )}
 
                         {/* PotPlayer */}
                         <button
